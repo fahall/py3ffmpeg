@@ -1,4 +1,5 @@
 import logging
+import subprocess
 import unittest
 from sys import stderr
 
@@ -12,9 +13,10 @@ logger.setLevel(logging.DEBUG)
 class FfmpegWrapperTest(unittest.TestCase):
 
     def test_simple(self):
-        i = 'input.mp4'
+        i = ['input.mp4']
         o = 'out.mp4'
-        cmd = py3ffmpeg.Ffmpeg().get_cmd(i, o)
+        assert(isinstance(o, str))
+        cmd = py3ffmpeg.Ffmpeg([i], o).get_cmd()
         self.assertEqual(cmd, 'ffmpeg -i input.mp4 out.mp4')
 
     def test_draw_text(self):
@@ -60,7 +62,7 @@ class FfmpegWrapperTest(unittest.TestCase):
         eve_pad = 'pad=width=1920:height=1080:x=0:y=(oh-ih)/2[neweve]'
         stacking = '[newbob][neweve]vstack=height=1080:width=1920:inputs=2'
 
-        # output names can be random, so do not test for equals
+        # output names can be random, so do not  test for equals
         stacker = py3ffmpeg.ScaledVStack(
             ['[bob]', '[eve]'], height=1080, width=1920)
         actual = stacker.filter()
@@ -72,7 +74,45 @@ class FfmpegWrapperTest(unittest.TestCase):
         self.assertIn(stacking, actual)
 
     def test_decoration(self):
-        pass
+        filt = py3ffmpeg.Scale(4, 3)
+        scale_part = 'scale=width=4:height=3'
+        self.assertEqual(filt.filter(), scale_part)
+        filt = py3ffmpeg.Pad(1920, 1200, filter_to_decorate=filt)
+        pad_part = 'pad=width=1920:height=1200:x=0:y=0'
+        self.assertIn(scale_part, filt.filter())
+        self.assertIn(pad_part, filt.filter())
+
+    def test_grid(self):
+        names = ['bob', 'eve', 'tim']
+        filt = py3ffmpeg.GridFilter(names, width=2560, height=1600)
+        self.assertIsInstance(filt, py3ffmpeg.GridFilter)
+        self.assertEqual(len(filt.strategies), 2)
+
+    def test_int_sqrt(self):
+        filt = py3ffmpeg.GridFilter([])
+        self.assertEqual(filt.int_sqrt(3), 2)
+        self.assertEqual(filt.int_sqrt(9), 3)
+        self.assertEqual(filt.int_sqrt(10), 4)
+
+    def test_sizing(self):
+        names = ['[bob]', '[eve]', '[tim]']
+        filt = py3ffmpeg.GridFilter(names)
+        self.assertEqual(filt.size, (2, 2))
+
+    def test_subsetting(self):
+        names = ['[bob]', '[eve]', '[tim]']
+        filt = py3ffmpeg.GridFilter(names, width=2560, height=1600)
+        self.assertIn(['[bob]', '[eve]'], filt.subsets)
+        self.assertIn(['[tim]'], filt.subsets)
+        self.assertEqual(len(filt.subsets), 2)
+
+    def test_complex_get_cmd(self):
+        names = ['test.mp4', 'test2.mp4', 'test3.mp4']
+        filters_to_pass = {py3ffmpeg.GridFilter: {'height': 1920},
+                           }
+        wrap = py3ffmpeg.Ffmpeg(
+            out_vid='out.mp4', in_vids=names, vf_filters=filters_to_pass)
+        print(wrap.get_cmd())
 
 
 def run():

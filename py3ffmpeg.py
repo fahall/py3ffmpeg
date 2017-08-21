@@ -1,26 +1,69 @@
+import re
 from random import randint
+
+import numpy as np
+
+__USED_OUTPUT_NAMES__ = []
+__CURRENT_OUTPUT_MAX__ = 2
+
+
+def chunks(iterable, chunk_size):
+    """Yield successive n-sized chunks from l."""
+    for i in range(0, len(iterable), chunk_size):
+        yield iterable[i:i + chunk_size]
 
 
 class Ffmpeg():
-    def get_cmd(self, in_vid, out_vid):
-        flags = [self._input(in_vid), self._output(out_vid)]
+    def __init__(self, in_vids=[], out_vid='out.mp4', vf_filters={}):
+        print(in_vids)
+        self.input_flag = self._input(in_vids)
+        self.input_list = in_vids
+        self.out_vid = out_vid
+        self.flags = {'vf': self.build_vf(vf_filters)}
+        assert(isinstance(out_vid, str))
+
+    def build_vf(self, vf_filters={}):
+        vf = VF(self.count)
+        for f, args in vf_filters.items():
+            vf.append_filter(f, **args)
+        return vf
+
+    @property
+    def count(self):
+        return len(self.input_list)
+
+    def get_flag_strings(self):
+        return [f.cli() for f in self.flags.values()]
+
+    def get_cmd(self):
+        i = self.input_flag
+        f = self.get_flag_strings(),
+        o = self.out_vid
+        flags = [i]
+        flags.extend(*f)
+        flags.append(o)
+        print(o)
+        assert(isinstance(o, str))
         return self._get_cmd(flags)
 
     def _get_cmd(self, flags):
         flags.insert(0, self._begin())
-        return ' '.join(flags)
+        raw = ' '.join(flags)
+        return re.sub(' +', ' ', raw)
 
     def _begin(self):
         return 'ffmpeg'
 
-    def _input(self, in_vid=''):
-        return self._flag_arg_string(self._in_flag(), [in_vid])
-
-    def _output(self, out_vid):
-        return out_vid
+    def _input(self, in_vids=[]):
+        inputs = [self._flag_arg_string(self._in_flag(), v) for v in in_vids]
+        return ' '.join(inputs)
 
     def _flag_arg_string(self, flag, args):
-        return ' '.join([flag, *args])
+        if isinstance(args, str):
+            out = ' '.join([flag, args])
+        else:
+            out = ' '.join([flag, *args])
+        return out
 
     def _in_flag(self):
         return self._flaggify('i')
@@ -34,6 +77,12 @@ class AbstractFfmpegFilter():
         self.kwargs = self._valid_filter_args(kwargs)
         self.other_filter = kwargs.get('filter_to_decorate', None)
         self.flag = kwargs.get('flag', '')
+        self.ignored_flags = ['strategy', 'pad_x', 'pad_y',
+                              'direction', 'filter_to_decorate', 'flag',
+                              'in_names']
+
+    def __str__(self):
+        return self.filter()
 
     def filter(self):
         return self._filter()
@@ -42,9 +91,7 @@ class AbstractFfmpegFilter():
         return {k: v for k, v in args.items() if self._is_passable_kwarg(k)}
 
     def _is_passable_kwarg(self, key):
-        do_not_pass = ['strategy', 'pad_x', 'pad_y',
-                       'direction', 'filter_to_decorate', 'flag']
-        return key not in do_not_pass
+        return key not in self.ignored_flags
 
     def _filter(self):
         string = ''
@@ -81,18 +128,18 @@ class FfmpegFilter(AbstractFfmpegFilter):
             return decoration
 
     def _component(self):
-        return self.other_filter.filter()
+        return str(self.other_filter)
 
 
 class DrawText(FfmpegFilter):
-    def __init__(self, text, **kwargs):
-        kwargs['flag'] = 'DrawText'
+    def __init__(self, text='', **kwargs):
+        kwargs['flag'] = 'drawtext'
         kwargs['text'] = text
         super().__init__(**kwargs)
 
 
 class Scale(FfmpegFilter):
-    def __init__(self, width, height, **kwargs):
+    def __init__(self, width=1920, height=1080, **kwargs):
         kwargs['width'] = width
         kwargs['height'] = height
         kwargs['flag'] = 'scale'
@@ -100,7 +147,7 @@ class Scale(FfmpegFilter):
 
 
 class Pad(FfmpegFilter):
-    def __init__(self, width, height, x=0, y=0, **kwargs):
+    def __init__(self, width=1920, height=1080, x=0, y=0, **kwargs):
         kwargs['width'] = width
         kwargs['height'] = height
         kwargs['x'] = x
@@ -135,7 +182,7 @@ class VerticalStackingDirection(AbstractStackingDirection):
 
 
 class AbstractStackingStrategy():
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         self.in_names = in_names
 
     def stack_names(self):
@@ -153,7 +200,7 @@ class PlainStacking(AbstractStackingStrategy):
 
 class ScaledStacking(AbstractStackingStrategy):
     # This vstack method handles scaling of inputs
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         self.store_dims(**kwargs)
         super().__init__(in_names, **kwargs)
 
@@ -203,7 +250,7 @@ class ScaledStacking(AbstractStackingStrategy):
 
 
 class StackFilter(FfmpegFilter):
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         self.in_names = in_names
         self.out_name = self._make_name(kwargs.get('name', None))
         kwargs['inputs'] = self.get_count()
@@ -217,6 +264,9 @@ class StackFilter(FfmpegFilter):
     def get_count(self):
         count = len(self.in_names)
         return count
+
+    def store_in_names(self, in_names):
+        __USED_OUTPUT_NAMES__.extend(in_names)
 
     def _choose_direction(self, **kwargs):
         default = HorizontalStackingDirection
@@ -242,8 +292,15 @@ class StackFilter(FfmpegFilter):
         return row
 
     def _make_name(self, name):
+        global __CURRENT_OUTPUT_MAX__
+        global __USED_OUTPUT_NAMES__
         if name is None:
-            name = randint(0, 10000)
+            name = randint(0, __CURRENT_OUTPUT_MAX__)
+            while name in __USED_OUTPUT_NAMES__:
+                __CURRENT_OUTPUT_MAX__ *= 2
+                name = randint(0, __CURRENT_OUTPUT_MAX__)
+
+        __USED_OUTPUT_NAMES__.append(name)
 
         name = str(name)
         if '[' not in name and ']' not in name:
@@ -253,29 +310,106 @@ class StackFilter(FfmpegFilter):
 
 class HStack(StackFilter):
     # Convenience Class
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         kwargs['strategy'] = PlainStacking
         kwargs['direction'] = HorizontalStackingDirection
         super().__init__(in_names, **kwargs)
+        self.ignored_flags.extend(['width'])
 
 
 class VStack(StackFilter):
     # Convenience Class
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         kwargs['strategy'] = PlainStacking
         kwargs['direction'] = VerticalStackingDirection
         super().__init__(in_names, **kwargs)
 
 
 class ScaledVStack(StackFilter):
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         kwargs['strategy'] = ScaledStacking
         kwargs['direction'] = VerticalStackingDirection
         super().__init__(in_names, **kwargs)
 
 
 class ScaledHStack(StackFilter):
-    def __init__(self, in_names, **kwargs):
+    def __init__(self, in_names=[], **kwargs):
         kwargs['strategy'] = ScaledStacking
         kwargs['direction'] = HorizontalStackingDirection
         super().__init__(in_names, **kwargs)
+
+
+class GridFilter(StackFilter):
+    def __init__(self, in_names=[], **kwargs):
+        self.height = kwargs.get('height', 1080)
+        self.width = kwargs.get('width', 1920)
+        self.in_names = in_names
+        self.strategies = {'h': kwargs.get('h_stacker', ScaledHStack),
+                           'v': kwargs.get('v_stacker', ScaledVStack), }
+        self.set_size()
+        self.subsets = self.build_subsets()
+        super().__init__(in_names, **kwargs)
+
+    def build_subsets(self):
+        if self.size[0] > 1:
+            subsets = list(chunks(self.in_names, self.size[0]))
+        else:
+            subsets = self.in_names
+        return subsets
+
+    def _filter(self):
+        rows = self.make_rows()
+        grid = self.stack_rows(rows)
+        return grid.filter()
+
+    def stack_rows(self, rows):
+        row_names = [r.out_name for r in rows]
+        args = {'height': self.height,
+                'width': self.width,
+                'filter_to_decorate': ','.join([r.filter() for r in rows])
+                }
+        filt = self.strategies['v'](row_names, **args)
+        return filt
+
+    def make_rows(self):
+        return [self.subset_to_row(sub) for sub in self.subsets]
+
+    def subset_to_row(self, subset):
+        return self.strategies['h'](subset, width=self.width)
+
+    def set_size(self):
+        # builds a cnt x cnt grid. squares only
+        count = len(self.in_names)
+        rows = self.int_sqrt(count)
+        self.size = (rows, rows)
+
+    def int_sqrt(self, count):
+        return int(np.ceil(np.sqrt(count)))
+
+
+class VF():
+    def __init__(self, count):
+        self._cli = '-vf'
+        self.current_filter = NullFilter()
+        self.current_output_names = [
+            self.num_to_input(i) for i in range(count)]
+        __USED_OUTPUT_NAMES__.extend(self.current_output_names)
+
+    def cli(self):
+        cli = ''
+        if not isinstance(self.current_filter, NullFilter):
+            cli = ' '.join([self._cli, '"', self.current_filter.filter(), '"'])
+
+        return cli
+
+    def append_filter(self, vid_filter, **kwargs):
+        kwargs['filter_to_decorate'] = self.current_filter
+        kwargs['in_names'] = self.current_output_names
+        filt = vid_filter(**kwargs)
+        self._update_filter(filt)
+
+    def _update_filter(self, filt):
+        self.current_filter = filt
+
+    def num_to_input(self, num):
+        return ''.join(['[', str(num), ']'])
